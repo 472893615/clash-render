@@ -1,0 +1,18 @@
+# config.yaml
+# Clash 配置文件模板
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+external-controller: '0.0.0.0:9090'
+
+# DNS 设置
+dns:
+  enable: true
+  listen: :53
+  enhanced-mode: fake-ip
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+    - 114.114.114.114

@@ -1,0 +1,16 @@
+# render.yaml
+services:
+  - type: web
+    name: clash-proxy-server
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: RENDER
+        value: "true"
+    healthCheckPath: /status
+    autoDeploy: true
+    buildCommand: ""
+    startCommand: "./start.sh"
