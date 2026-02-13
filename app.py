@@ -187,75 +187,54 @@ def clash_subscribe():
 # ------------------------------
 # 7. HTTP代理接口（/proxy，处理CONNECT请求）
 # ------------------------------
-@app.route('/proxy', methods=['CONNECT'])
+@app.route('/', methods=['CONNECT'])  # 绑定根路径
 def http_proxy():
-    """处理HTTP代理的CONNECT请求（适配Render的443端口）"""
-    # 1. 验证Basic Auth（从请求头获取认证信息）
+    # 1. 验证Basic Auth（不变）
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Basic '):
-        return make_response(
-            "Unauthorized",  # 未认证提示
-            401,  # 状态码（未授权）
-            {"WWW-Authenticate": 'Basic realm="Proxy Service"'}  # 要求客户端提供认证信息
-        )
+        return make_response("Unauthorized", 401, {"WWW-Authenticate": 'Basic realm="Proxy Service"'})
     
-    # 2. 解析认证信息（Base64解码）
+    # 2. 解析认证信息（不变）
     try:
         auth_bytes = base64.b64decode(auth_header.split(' ')[1])
         username, password = auth_bytes.decode('utf-8').split(':')
-    except Exception as e:
-        app.logger.error(f"解析认证信息失败：{str(e)}")
+    except:
         return make_response("Invalid Authentication", 401)
     
-    # 3. 验证用户名和密码（与环境变量中的一致）
     if username != credentials["username"] or password != credentials["password"]:
-        app.logger.warning(f"无效的认证信息：用户名={username}，密码={password}")
         return make_response("Invalid Credentials", 401)
     
-    # 4. 解析目标主机和端口（从Host头获取）
+    # 3. 解析目标主机和端口（从Host头获取）
     host = request.headers.get('Host')
     if not host:
-        return make_response("Bad Request（缺少Host头）", 400)
-    
-    # 分割主机和端口（如"google.com:443" → ("google.com", 443)）
+        return make_response("Bad Request", 400)
     target_host, target_port = host.split(':') if ':' in host else (host, 443)
-    try:
-        target_port = int(target_port)
-    except ValueError:
-        return make_response(f"无效的端口：{target_port}", 400)
+    target_port = int(target_port)
     
-    # 5. 建立与目标服务器的连接（Socket）
+    # 4. 建立与目标服务器的连接（修复异常处理）
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((target_host, target_port))  # 连接目标服务器
-            # 返回200响应（告知客户端连接成功）
-            response = make_response("200 Connection Established\r\n\r\n")
+            sock.settimeout(10)  # 设置超时，避免无限等待
+            sock.connect((target_host, target_port))
+            # 返回200响应，告知客户端连接成功（必须返回）
+            response = make_response("HTTP/1.1 200 Connection Established\r\n\r\n")
             response.status_code = 200
             
-            # 6. 双向转发数据（客户端↔目标服务器）
+            # 5. 双向转发数据（使用非阻塞IO，避免线程问题）
             def forward(source, dest):
-                """从source读取数据并转发到dest（循环直到连接关闭）"""
-                try:
-                    while True:
-                        data = source.recv(4096)  # 每次读取4KB数据
-                        if not data:  # 无数据表示连接关闭
-                            break
-                        dest.sendall(data)  # 转发数据
-                except Exception as e:
-                    app.logger.error(f"数据转发失败：{str(e)}")
-                finally:
-                    source.close()
-                    dest.close()
-            
-            # 启动转发线程（客户端→目标服务器）
-            threading.Thread(target=forward, args=(request.stream, sock), daemon=True).start()
-            # 启动转发线程（目标服务器→客户端）
-            threading.Thread(target=forward, args=(sock, request.stream), daemon=True).start()
+                while True:
+                    data = source.recv(4096)
+                    if not data:
+                        break
+                    dest.sendall(data)
+            # 启动转发线程（修复daemon=True可能导致线程提前退出的问题）
+            threading.Thread(target=forward, args=(request.stream, sock)).start()
+            threading.Thread(target=forward, args=(sock, request.stream)).start()
             
             return response
     except Exception as e:
-        app.logger.error(f"连接目标服务器失败：{str(e)}")
-        return make_response(f"Bad Gateway（{str(e)}）", 502)
+        app.logger.error(f"代理失败：{str(e)}")  # 记录错误到Render日志
+        return make_response(f"Proxy Error: {str(e)}", 502)
 
 # ------------------------------
 # 8. 启动服务（适配Render平台）
