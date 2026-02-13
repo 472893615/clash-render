@@ -2,8 +2,6 @@ from flask import Flask, request, jsonify, make_response, abort
 from flask_cors import CORS
 import yaml
 import base64
-import random
-import string
 import socket
 import threading
 import os
@@ -15,17 +13,23 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ------------------------------
-# 1. 动态生成Credentials（每次启动随机生成）
+# 1. 从环境变量获取Credentials（所有实例共享，解决不一致问题）
 # ------------------------------
+# 必须在Render平台设置以下环境变量（Settings→Environment Variables）
+required_env_vars = ["PROXY_USERNAME", "PROXY_PASSWORD"]
+for var in required_env_vars:
+    if var not in os.environ:
+        raise ValueError(f"❌ 必须设置环境变量：{var}（在Render平台的Settings→Environment Variables中设置）")
+
 credentials = {
-    "username": ''.join(random.choices(string.ascii_lowercase + string.digits, k=8)),
-    "password": ''.join(random.choices(string.ascii_lowercase + string.digits, k=12)),
+    "username": os.environ["PROXY_USERNAME"],
+    "password": os.environ["PROXY_PASSWORD"],
     "generated_at": datetime.now().isoformat()
 }
-app.logger.info(f"✅ 服务启动成功：生成新Credentials\n- Username: {credentials['username']}\n- Password: {credentials['password']}")
+app.logger.info(f"✅ 服务启动成功：使用环境变量中的Credentials\n- Username: {credentials['username']}\n- Password: {credentials['password']}")
 
 # ------------------------------
-# 2. 配置项（适配Render平台，可通过环境变量调整）
+# 2. 配置项（适配Render平台）
 # ------------------------------
 config = {
     "http_port": int(os.environ.get("HTTP_PORT", 8080)),  # HTTP代理端口（Render默认暴露8080）
@@ -61,15 +65,16 @@ def index():
         
         <div class="card">
             <h2>📌 核心功能接口</h2>
-            <p>1. 获取最新Credentials（用户名/密码）：<a class="link" href="/api/credentials" target="_blank">/api/credentials</a></p>
+            <p>1. 获取当前Credentials（用户名/密码）：<a class="link" href="/api/credentials" target="_blank">/api/credentials</a></p>
             <p>2. 获取Clash订阅链接（可直接导入客户端）：<a class="link" href="/clash/subscribe" target="_blank">/clash/subscribe</a></p>
         </div>
         
         <div class="card">
             <h2>💡 使用说明</h2>
-            <p>1. 访问<code>/api/credentials</code>获取当前有效的用户名和密码；</p>
-            <p>2. 将<code>/clash/subscribe</code>链接导入Clash客户端（自动同步最新Credentials）；</p>
-            <p>3. 代理节点支持HTTP/SOCKS5协议，均需身份认证。</p>
+            <p>1. 确保已在Render平台设置环境变量：<code>PROXY_USERNAME</code>和<code>PROXY_PASSWORD</code>；</p>
+            <p>2. 访问<code>/api/credentials</code>验证Credentials是否正确；</p>
+            <p>3. 将<code>/clash/subscribe</code>链接导入Clash客户端（自动同步Credentials）；</p>
+            <p>4. 代理节点支持HTTP/SOCKS5协议，均需身份认证。</p>
         </div>
         
         <div class="note">
@@ -80,7 +85,7 @@ def index():
     """
 
 # ------------------------------
-# 4. 核心接口：返回当前Credentials（供用户获取最新信息）
+# 4. 核心接口：返回当前Credentials（从环境变量获取，所有实例一致）
 # ------------------------------
 @app.route('/api/credentials')
 def get_credentials():
@@ -94,11 +99,11 @@ def get_credentials():
     })
 
 # ------------------------------
-# 5. 核心功能：生成Clash订阅配置（动态同步Credentials）
+# 5. 核心功能：生成Clash订阅配置（使用环境变量中的Credentials，所有实例一致）
 # ------------------------------
 @app.route('/clash/subscribe')
 def clash_subscribe():
-    # 构建Clash配置（动态使用当前Credentials）
+    # 构建Clash配置（从环境变量获取Credentials，所有实例一致）
     clash_config = {
         "proxies": [
             # HTTP代理节点（带Basic Auth，支持HTTPS）
@@ -153,12 +158,12 @@ def clash_subscribe():
     return response
 
 # ------------------------------
-# 6. 核心功能：HTTP代理（强制Basic Auth，支持HTTPS）
+# 6. 核心功能：HTTP代理（强制Basic Auth，使用环境变量中的Credentials）
 # ------------------------------
 @app.route('/proxy', methods=['CONNECT'])
 def http_proxy():
     """处理HTTP代理的CONNECT请求（用于HTTPS转发）"""
-    # 1. 验证Basic Auth
+    # 1. 验证Basic Auth（使用环境变量中的Credentials）
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Basic '):
         app.logger.warning("❌ HTTP代理：缺少Basic Auth认证")
@@ -172,7 +177,7 @@ def http_proxy():
         app.logger.error(f"❌ HTTP代理：解析认证信息失败：{str(e)}")
         abort(401, description="Invalid Authentication Format")
     
-    # 验证用户名密码是否正确
+    # 验证用户名密码是否与环境变量中的一致
     if username != credentials["username"] or password != credentials["password"]:
         app.logger.warning(f"❌ HTTP代理：认证失败（用户名={username}, 密码={password}）")
         abort(401, description="Invalid Username or Password")
@@ -216,7 +221,7 @@ def http_proxy():
         abort(502, description="Bad Gateway")
 
 # ------------------------------
-# 7. 核心功能：SOCKS5代理（强制用户名密码认证，支持UDP）
+# 7. 核心功能：SOCKS5代理（强制用户名密码认证，使用环境变量中的Credentials）
 # ------------------------------
 def handle_socks5_authentication(conn):
     """处理SOCKS5的认证阶段（用户名密码认证）"""
@@ -239,7 +244,7 @@ def handle_socks5_authentication(conn):
     conn.sendall(b'\x05\x02')
     app.logger.debug("🔑 SOCKS5代理：协商认证方式为用户名密码")
 
-    # 2. 验证用户名密码
+    # 2. 验证用户名密码（与环境变量中的一致）
     data = conn.recv(2)
     if not data or data[0] != 0x01:  # 认证版本
         conn.close()
@@ -250,7 +255,7 @@ def handle_socks5_authentication(conn):
     password_len = conn.recv(1)[0]
     password = conn.recv(password_len).decode()
 
-    # 验证用户名密码
+    # 验证用户名密码是否与环境变量中的一致
     if username != credentials["username"] or password != credentials["password"]:
         app.logger.warning(f"❌ SOCKS5代理：认证失败（用户名={username}, 密码={password}）")
         conn.sendall(b'\x01\x01')  # 认证失败（0x01）
@@ -266,7 +271,7 @@ def handle_socks5_connection(conn, addr):
     """处理SOCKS5代理的连接请求"""
     app.logger.info(f"🔌 SOCKS5代理：收到来自{addr}的连接")
     
-    # 1. 强制认证
+    # 1. 强制认证（使用环境变量中的Credentials）
     if not handle_socks5_authentication(conn):
         return
     
