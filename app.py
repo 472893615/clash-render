@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ------------------------------
-# 1. 环境变量获取（支持默认值，解决未设置导致的启动失败）
+# 1. 环境变量获取（支持默认值，解决启动失败问题）
 # ------------------------------
 def generate_random_string(length: int) -> str:
     """生成随机字符串（用于默认Credentials）"""
@@ -259,61 +259,4 @@ def handle_socks5_authentication(conn):
     password_len = conn.recv(1)[0]
     password = conn.recv(password_len).decode()
 
-    # 验证用户名密码是否正确
-    if username != credentials["username"] or password != credentials["password"]:
-        app.logger.warning(f"❌ SOCKS5代理：认证失败（用户名={username}, 密码={password}）")
-        conn.sendall(b'\x01\x01')  # 认证失败（0x01）
-        conn.close()
-        return False
-    
-    # 认证成功
-    conn.sendall(b'\x01\x00')  # 认证成功（0x00）
-    app.logger.info(f"✅ SOCKS5代理：认证成功（用户名={username}）")
-    return True
-
-def handle_socks5_connection(conn, addr):
-    """处理SOCKS5代理的连接请求"""
-    app.logger.info(f"🔌 SOCKS5代理：收到来自{addr}的连接")
-    
-    # 1. 强制认证（使用当前Credentials）
-    if not handle_socks5_authentication(conn):
-        return
-    
-    # 2. 处理请求
-    try:
-        data = conn.recv(4)
-        if not data or data[0] != 0x05:
-            conn.close()
-            return
-        
-        cmd = data[1]  # 0x01=CONNECT（TCP），0x03=UDP ASSOCIATE（UDP）
-        addr_type = data[3]
-
-        # 解析目标地址
-        if addr_type == 0x01:  # IPv4
-            target_addr = socket.inet_ntoa(conn.recv(4))
-        elif addr_type == 0x03:  # 域名
-            addr_len = conn.recv(1)[0]
-            target_addr = conn.recv(addr_len).decode()
-        elif addr_type == 0x04:  # IPv6
-            target_addr = socket.inet_ntop(socket.AF_INET6, conn.recv(16))
-        else:
-            conn.close()
-            return
-        
-        # 解析目标端口
-        target_port = int.from_bytes(conn.recv(2), 'big')
-        app.logger.info(f"🎯 SOCKS5代理：目标地址={target_addr}:{target_port}, 命令={cmd}")
-
-        # 3. 处理命令
-        if cmd == 0x01:  # TCP CONNECT
-            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_sock.connect((target_addr, target_port))
-            # 返回成功响应（SOCKS5格式）
-            conn.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
-            # 双向转发数据
-            def forward(source, dest):
-                try:
-                    while True:
-                        data = source.recv(4096)
-                        if not
+   
