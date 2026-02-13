@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 from base64 import b64decode
 
-# 初始化Flask应用
+# 初始化Flask应用（开启CORS）
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -22,10 +22,10 @@ credentials = {
     "password": ''.join(random.choices(string.ascii_lowercase + string.digits, k=12)),
     "generated_at": datetime.now().isoformat()
 }
-app.logger.info(f"Generated new credentials: username={credentials['username']}, password={credentials['password']}")
+app.logger.info(f"✅ 服务启动成功：生成新Credentials\n- Username: {credentials['username']}\n- Password: {credentials['password']}")
 
 # ------------------------------
-# 2. 配置项（从环境变量获取，适配Render）
+# 2. 配置项（适配Render平台，可通过环境变量调整）
 # ------------------------------
 config = {
     "http_port": int(os.environ.get("HTTP_PORT", 8080)),  # HTTP代理端口（Render默认暴露8080）
@@ -35,7 +35,52 @@ config = {
 }
 
 # ------------------------------
-# 3. 核心接口：返回当前Credentials（供用户获取最新username）
+# 3. 根路径：引导页面（解决Not Found问题）
+# ------------------------------
+@app.route('/')
+def index():
+    return """
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <title>Clash Proxy Service（Render部署）</title>
+        <style>
+            body { font-family: '微软雅黑', Arial, sans-serif; max-width: 900px; margin: 50px auto; padding: 0 20px; }
+            h1 { color: #2d3748; font-size: 2.5em; margin-bottom: 30px; }
+            .card { background: #f7fafc; border-radius: 10px; padding: 20px 30px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .card h2 { color: #2b6cb0; font-size: 1.5em; margin-bottom: 15px; }
+            .card p { color: #4a5568; font-size: 1.1em; line-height: 1.6; }
+            .link { color: #2b6cb0; text-decoration: none; font-weight: bold; }
+            .link:hover { text-decoration: underline; }
+            .note { background: #fff3cd; border-radius: 10px; padding: 15px 20px; margin-top: 30px; color: #856404; }
+        </style>
+    </head>
+    <body>
+        <h1>🌐 Clash Proxy Service（Render部署）</h1>
+        
+        <div class="card">
+            <h2>📌 核心功能接口</h2>
+            <p>1. 获取最新Credentials（用户名/密码）：<a class="link" href="/api/credentials" target="_blank">/api/credentials</a></p>
+            <p>2. 获取Clash订阅链接（可直接导入客户端）：<a class="link" href="/clash/subscribe" target="_blank">/clash/subscribe</a></p>
+        </div>
+        
+        <div class="card">
+            <h2>💡 使用说明</h2>
+            <p>1. 访问<code>/api/credentials</code>获取当前有效的用户名和密码；</p>
+            <p>2. 将<code>/clash/subscribe</code>链接导入Clash客户端（自动同步最新Credentials）；</p>
+            <p>3. 代理节点支持HTTP/SOCKS5协议，均需身份认证。</p>
+        </div>
+        
+        <div class="note">
+            <p>⚠️ 提示：根路径（/）无内容，核心功能在上述接口中。若需帮助，请查看服务日志或联系开发者。</p>
+        </div>
+    </body>
+    </html>
+    """
+
+# ------------------------------
+# 4. 核心接口：返回当前Credentials（供用户获取最新信息）
 # ------------------------------
 @app.route('/api/credentials')
 def get_credentials():
@@ -49,14 +94,14 @@ def get_credentials():
     })
 
 # ------------------------------
-# 4. 核心功能：生成Clash订阅配置（动态同步最新Credentials）
+# 5. 核心功能：生成Clash订阅配置（动态同步Credentials）
 # ------------------------------
 @app.route('/clash/subscribe')
 def clash_subscribe():
-    # 使用当前Credentials生成Clash配置
+    # 构建Clash配置（动态使用当前Credentials）
     clash_config = {
         "proxies": [
-            # HTTP代理节点（带Basic Auth）
+            # HTTP代理节点（带Basic Auth，支持HTTPS）
             {
                 "name": "Render-HTTP-Proxy",
                 "type": "http",
@@ -67,7 +112,7 @@ def clash_subscribe():
                 "tls": True,
                 "skip-cert-verify": False
             },
-            # SOCKS5代理节点（带用户名密码认证）
+            # SOCKS5代理节点（带用户名密码认证，支持UDP）
             {
                 "name": "Render-SOCKS5-Proxy",
                 "type": "socks5",
@@ -98,16 +143,17 @@ def clash_subscribe():
     }
 
     # 转换为YAML并Base64编码（Clash订阅格式）
-    yaml_config = yaml.dump(clash_config, allow_unicode=True)
+    yaml_config = yaml.dump(clash_config, allow_unicode=True, default_flow_style=False)
     base64_config = base64.b64encode(yaml_config.encode()).decode()
 
-    # 返回订阅响应
+    # 返回订阅响应（符合Clash客户端要求）
     response = make_response(base64_config)
     response.headers["Content-Type"] = "text/plain"
+    response.headers["X-Clash-Config"] = "Render-Proxy-Subscribe"
     return response
 
 # ------------------------------
-# 5. 核心功能：HTTP代理（支持HTTPS，强制Basic Auth）
+# 6. 核心功能：HTTP代理（强制Basic Auth，支持HTTPS）
 # ------------------------------
 @app.route('/proxy', methods=['CONNECT'])
 def http_proxy():
@@ -115,21 +161,21 @@ def http_proxy():
     # 1. 验证Basic Auth
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Basic '):
-        app.logger.warning("HTTP代理：缺少Basic Auth认证")
-        abort(401, description="Unauthorized", headers={"WWW-Authenticate": "Basic realm='Proxy'"})
+        app.logger.warning("❌ HTTP代理：缺少Basic Auth认证")
+        abort(401, description="Unauthorized", headers={"WWW-Authenticate": "Basic realm='Proxy Service'"})
     
     # 解析用户名密码
     try:
         auth_bytes = b64decode(auth_header.split(' ')[1])
         username, password = auth_bytes.decode().split(':')
     except Exception as e:
-        app.logger.error(f"HTTP代理：解析认证信息失败：{str(e)}")
-        abort(401, description="Invalid Auth")
+        app.logger.error(f"❌ HTTP代理：解析认证信息失败：{str(e)}")
+        abort(401, description="Invalid Authentication Format")
     
     # 验证用户名密码是否正确
     if username != credentials["username"] or password != credentials["password"]:
-        app.logger.warning(f"HTTP代理：认证失败，用户名={username}, 密码={password}")
-        abort(401, description="Invalid Credentials")
+        app.logger.warning(f"❌ HTTP代理：认证失败（用户名={username}, 密码={password}）")
+        abort(401, description="Invalid Username or Password")
 
     # 2. 处理CONNECT请求（转发HTTPS）
     try:
@@ -139,7 +185,7 @@ def http_proxy():
         # 建立与目标服务器的TCP连接
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((target_host, target_port))
-        app.logger.info(f"HTTP代理：成功连接目标服务器：{target_host}:{target_port}")
+        app.logger.info(f"✅ HTTP代理：成功连接目标服务器：{target_host}:{target_port}")
 
         # 返回连接成功响应
         response = make_response("200 Connection Established\r\n\r\n")
@@ -147,7 +193,7 @@ def http_proxy():
         response.headers['Connection'] = 'keep-alive'
 
         # 双向转发数据（客户端↔目标服务器）
-        def forward(source, destination):
+        def forward_data(source, destination):
             try:
                 while True:
                     data = source.recv(4096)
@@ -155,28 +201,28 @@ def http_proxy():
                         break
                     destination.sendall(data)
             except Exception as e:
-                app.logger.error(f"HTTP代理：数据转发失败：{str(e)}")
+                app.logger.error(f"❌ HTTP代理：数据转发失败：{str(e)}")
             finally:
                 source.close()
                 destination.close()
 
-        # 启动转发线程
-        threading.Thread(target=forward, args=(request.stream, sock), daemon=True).start()
-        threading.Thread(target=forward, args=(sock, request.stream), daemon=True).start()
+        # 启动转发线程（后台运行）
+        threading.Thread(target=forward_data, args=(request.stream, sock), daemon=True).start()
+        threading.Thread(target=forward_data, args=(sock, request.stream), daemon=True).start()
 
         return response
     except Exception as e:
-        app.logger.error(f"HTTP代理：处理请求失败：{str(e)}")
+        app.logger.error(f"❌ HTTP代理：处理请求失败：{str(e)}")
         abort(502, description="Bad Gateway")
 
 # ------------------------------
-# 6. 核心功能：SOCKS5代理（支持UDP，强制用户名密码认证）
+# 7. 核心功能：SOCKS5代理（强制用户名密码认证，支持UDP）
 # ------------------------------
 def handle_socks5_authentication(conn):
     """处理SOCKS5的认证阶段（用户名密码认证）"""
     # 1. 握手：协商认证方式
     data = conn.recv(2)
-    if not data or data[0] != 0x05:  # SOCKS5版本
+    if not data or data[0] != 0x05:  # SOCKS5版本号
         conn.close()
         return False
     
@@ -191,7 +237,7 @@ def handle_socks5_authentication(conn):
     
     # 选择0x02认证方式
     conn.sendall(b'\x05\x02')
-    app.logger.debug("SOCKS5代理：协商认证方式为用户名密码")
+    app.logger.debug("🔑 SOCKS5代理：协商认证方式为用户名密码")
 
     # 2. 验证用户名密码
     data = conn.recv(2)
@@ -206,21 +252,21 @@ def handle_socks5_authentication(conn):
 
     # 验证用户名密码
     if username != credentials["username"] or password != credentials["password"]:
-        app.logger.warning(f"SOCKS5代理：认证失败，用户名={username}, 密码={password}")
+        app.logger.warning(f"❌ SOCKS5代理：认证失败（用户名={username}, 密码={password}）")
         conn.sendall(b'\x01\x01')  # 认证失败（0x01）
         conn.close()
         return False
     
     # 认证成功
     conn.sendall(b'\x01\x00')  # 认证成功（0x00）
-    app.logger.info(f"SOCKS5代理：认证成功，用户名={username}")
+    app.logger.info(f"✅ SOCKS5代理：认证成功（用户名={username}）")
     return True
 
 def handle_socks5_connection(conn, addr):
     """处理SOCKS5代理的连接请求"""
-    app.logger.info(f"SOCKS5代理：收到来自{addr}的连接")
+    app.logger.info(f"🔌 SOCKS5代理：收到来自{addr}的连接")
     
-    # 1. 认证（强制）
+    # 1. 强制认证
     if not handle_socks5_authentication(conn):
         return
     
@@ -248,7 +294,7 @@ def handle_socks5_connection(conn, addr):
         
         # 解析目标端口
         target_port = int.from_bytes(conn.recv(2), 'big')
-        app.logger.info(f"SOCKS5代理：目标地址={target_addr}:{target_port}, 命令={cmd}")
+        app.logger.info(f"🎯 SOCKS5代理：目标地址={target_addr}:{target_port}, 命令={cmd}")
 
         # 3. 处理命令
         if cmd == 0x01:  # TCP CONNECT
@@ -265,7 +311,7 @@ def handle_socks5_connection(conn, addr):
                             break
                         dest.sendall(data)
                 except Exception as e:
-                    app.logger.error(f"SOCKS5代理：TCP转发失败：{str(e)}")
+                    app.logger.error(f"❌ SOCKS5代理：TCP转发失败：{str(e)}")
                 finally:
                     source.close()
                     dest.close()
@@ -274,30 +320,30 @@ def handle_socks5_connection(conn, addr):
         elif cmd == 0x03:  # UDP ASSOCIATE
             # 返回当前服务器地址和端口（简单处理）
             conn.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
-            app.logger.info(f"SOCKS5代理：UDP关联成功，目标地址={target_addr}:{target_port}")
+            app.logger.info(f"✅ SOCKS5代理：UDP关联成功（目标地址={target_addr}:{target_port}）")
         else:
             # 不支持的命令
             conn.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')  # 0x07=COMMAND NOT SUPPORTED
             conn.close()
     except Exception as e:
-        app.logger.error(f"SOCKS5代理：处理请求失败：{str(e)}")
+        app.logger.error(f"❌ SOCKS5代理：处理请求失败：{str(e)}")
         conn.close()
 
 def start_socks5_server():
-    """启动SOCKS5代理服务"""
+    """启动SOCKS5代理服务（后台线程）"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(('0.0.0.0', config["socks5_port"]))
         sock.listen(5)
-        app.logger.info(f"SOCKS5代理服务启动，监听端口：{config['socks5_port']}")
+        app.logger.info(f"🚀 SOCKS5代理服务启动成功，监听端口：{config['socks5_port']}")
         while True:
             conn, addr = sock.accept()
             threading.Thread(target=handle_socks5_connection, args=(conn, addr), daemon=True).start()
     except Exception as e:
-        app.logger.error(f"SOCKS5代理服务启动失败：{str(e)}")
+        app.logger.error(f"❌ SOCKS5代理服务启动失败：{str(e)}")
 
 # ------------------------------
-# 7. 启动服务
+# 8. 启动服务（Flask + SOCKS5代理）
 # ------------------------------
 if __name__ == '__main__':
     # 启动SOCKS5代理服务（后台线程）
