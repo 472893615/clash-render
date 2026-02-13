@@ -252,4 +252,114 @@ def http_proxy():
 # 9. SOCKS5代理实现（内部服务）
 # ------------------------------
 def handle_socks5_authentication(conn):
-    """处理SOCKS
+    """处理SOCKS5认证（使用与HTTP代理相同的用户名/密码）"""
+    # 读取客户端问候（版本+认证方法数量+方法列表）
+    data = conn.recv(2)
+    if not data or data[0] != 0x05:  # SOCKS5版本必须为0x05
+        return False
+    n_methods = data[1]
+    methods = conn.recv(n_methods)
+    
+    # 只支持用户名/密码认证（0x02）
+    if 0x02 not in methods:
+        conn.sendall(b'\x05\xFF')  # 无可用认证方法
+        return False
+    conn.sendall(b'\x05\x02')  # 选择用户名/密码认证
+    
+    # 验证用户名/密码
+    data = conn.recv(2)
+    if not data or data[0] != 0x01:  # 子协商版本必须为0x01
+        return False
+    username_len = data[1]
+    username = conn.recv(username_len).decode()
+    password_len = ord(conn.recv(1))
+    password = conn.recv(password_len).decode()
+    
+    if username == credentials["username"] and password == credentials["password"]:
+        conn.sendall(b'\x01\x00')  # 认证成功
+        return True
+    else:
+        conn.sendall(b'\x01\x01')  # 认证失败
+        return False
+
+def handle_socks5_connection(conn, addr):
+    """处理SOCKS5连接请求（解析目标地址并转发数据）"""
+    app.logger.info(f"SOCKS5连接来自：{addr}")
+    try:
+        # 认证
+        if not handle_socks5_authentication(conn):
+            conn.close()
+            return
+        
+        # 解析请求（版本+命令+保留位+地址类型）
+        data = conn.recv(4)
+        if not data or data[0] != 0x05 or data[1] != 0x01:  # 只支持CONNECT命令
+            conn.sendall(b'\x05\x07\x00\x01')  # 命令不支持
+            conn.close()
+            return
+        
+        # 解析目标地址（支持IPv4、域名、IPv6）
+        addr_type = data[3]
+        if addr_type == 0x01:  # IPv4
+            target_host = socket.inet_ntoa(conn.recv(4))
+        elif addr_type == 0x03:  # 域名
+            domain_len = ord(conn.recv(1))
+            target_host = conn.recv(domain_len).decode()
+        elif addr_type == 0x04:  # IPv6（暂不支持）
+            conn.sendall(b'\x05\x08\x00\x01')
+            conn.close()
+            return
+        else:
+            conn.sendall(b'\x05\x08\x00\x01')  # 地址类型不支持
+            conn.close()
+            return
+        
+        # 解析目标端口
+        target_port = int.from_bytes(conn.recv(2), byteorder='big')
+        
+        # 连接目标服务器
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.connect((target_host, target_port))
+                # 返回连接成功响应
+                conn.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+                # 双向转发数据
+                def forward(source, dest):
+                    while True:
+                        data = source.recv(4096)
+                        if not data:
+                            break
+                        dest.sendall(data)
+                
+                threading.Thread(target=forward, args=(conn, sock), daemon=True).start()
+                threading.Thread(target=forward, args=(sock, conn), daemon=True).start()
+            except Exception as e:
+                app.logger.error(f"SOCKS5连接目标失败：{str(e)}")
+                conn.sendall(b'\x05\x05\x00\x01')  # 连接拒绝
+                conn.close()
+    except Exception as e:
+        app.logger.error(f"SOCKS5处理错误：{str(e)}")
+    finally:
+        conn.close()
+
+def start_socks5_server():
+    """启动SOCKS5代理服务（后台线程）"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('0.0.0.0', config["socks5_port"]))
+            sock.listen(5)
+            app.logger.info(f"SOCKS5服务启动，内部端口：{config['socks5_port']}")
+            while True:
+                conn, addr = sock.accept()
+                threading.Thread(target=handle_socks5_connection, args=(conn, addr), daemon=True).start()
+    except Exception as e:
+        app.logger.error(f"SOCKS5服务启动失败：{str(e)}")
+
+# ------------------------------
+# 10. 启动服务
+# ------------------------------
+if __name__ == '__main__':
+    # 启动SOCKS5服务（后台线程）
+    threading.Thread(target=start_socks5_server, daemon=True).start()
+    # 启动Flask应用（监听Render分配的端口）
+    app.run(host='0.0.0.0', port=config["http_port"], debug=False)
